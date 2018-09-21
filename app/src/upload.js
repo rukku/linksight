@@ -8,7 +8,7 @@ import {Redirect} from 'react-router-dom'
 import * as colors from './colors'
 
 // Elements
-import {Instruction} from './elements'
+import {Button, Instruction} from './elements'
 
 // Layouts
 import Page from './layouts/page'
@@ -42,6 +42,11 @@ class Upload extends React.Component {
         ))}
       </Grid>
     )
+  }
+  loadTestDataset () {
+    let datasetId = process.env.TEST_DATASET_ID
+    console.log(datasetId)
+    this.setState({datasetId})
   }
   renderInstruction () {
     return renderToString(
@@ -100,7 +105,7 @@ class Upload extends React.Component {
                   <li>Barangay, Municipality or City, or Province (whichever is available) should be in separate columns.</li>
                 </ul>
                 <br />
-                <p className='note'>Don't have a dataset? You can also use sample datasets <a href='https://drive.google.com/drive/u/0/folders/1Yo1Y68fLnOcj_x-AEQh-V5S7_H08s_IV' target='_blank'>here</a>.</p>
+                <p className='note'>Don't have a dataset? You can also use sample datasets <Button className='btn' onClick={this.loadTestDataset.bind(this)}>here</Button>.</p>
                 <br />
                 <p className='note -important'><strong>Important</strong>: Linksight needs to save a copy of your data to process it. The copy will be deleted from our system within 24 hours of upload.</p>
               </div>
