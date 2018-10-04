@@ -1,18 +1,38 @@
+# Build config
+
+timeout: 900s
+
+artifacts:
+  objects:
+    location: 'gs://${PROJECT_ID}_cloudbuild/cache'
+    paths: ['cache/*.tar.gz']
+
+images:
+- 'gcr.io/$PROJECT_ID/python:$TAG_NAME'
+- 'gcr.io/$PROJECT_ID/nginx:$TAG_NAME'
+
+substitutions:
+  _HOST: linksight.thinkingmachin.es
+
 steps:
 
-# Pull images for faster builds
+- name: 'gcr.io/cloud-builders/gsutil'
+  id: cache
+  waitFor: ['-']
+  entrypoint: bash
+  args:
+    - -c
+    - >
+      (gsutil cp gs://${PROJECT_ID}_cloudbuild/cache/*.tar.gz . &&
+       tar xzf venv.tar.gz &&
+       cd app &&
+       tar xzf ../node_modules.tar.gz) || true
 
 - name: 'gcr.io/cloud-builders/docker'
   id: pull-python
   waitFor: ['-']
   entrypoint: bash
   args: ['-c', 'docker pull gcr.io/$PROJECT_ID/python:$TAG_NAME || true']
-
-- name: 'gcr.io/cloud-builders/docker'
-  id: pull-node
-  waitFor: ['-']
-  entrypoint: bash
-  args: ['-c', 'docker pull gcr.io/$PROJECT_ID/node:$TAG_NAME || true']
 
 - name: 'gcr.io/cloud-builders/docker'
   id: pull-nginx
@@ -23,7 +43,7 @@ steps:
 # Setup environment variables
 
 - name: 'gcr.io/cloud-builders/gcloud'
-  id: decrypt-env
+  id: env
   waitFor: ['-']
   args:
   - kms
@@ -34,103 +54,107 @@ steps:
   - --keyring=linksight
   - --key=linksight
 
+# Build dependencies
+
+- name: 'python:3.6-stretch'
+  id: python-deps
+  waitFor: ['cache', 'env']
+  entrypoint: bash
+  args:
+    - -c
+    - >
+      cp -r /workspace /usr/src/app &&
+      cd /usr/src/app &&
+      python3 -m venv venv &&
+      venv/bin/pip install -r requirements.txt &&
+      venv/bin/python manage.py collectstatic --no-input &&
+      cp -r /usr/src/app/venv /workspace/ &&
+      cp -r /usr/src/app/static /workspace/ &&
+      mkdir -p /workspace/cache &&
+      tar czf /workspace/cache/venv.tar.gz venv
+
+- name: 'node:8-stretch'
+  id: node-deps
+  waitFor: ['cache']
+  entrypoint: bash
+  args:
+    - -c
+    - >
+      cp -r /workspace/app /usr/src/app &&
+      cd /usr/src/app &&
+      npm install &&
+      npm run build &&
+      cp -r /usr/src/app/build /workspace/app/build &&
+      mkdir -p /workspace/cache &&
+      tar czf /workspace/cache/node_modules.tar.gz node_modules
+  env:
+  - 'PUBLIC_URL=https://$_HOST'
+
 # Build images
 
 - name: 'gcr.io/cloud-builders/docker'
-  id: build-python
-  waitFor: ['decrypt-env', 'pull-python']
+  id: python-image
+  waitFor: ['pull-python', 'python-deps']
+  entrypoint: bash
   args:
-  - build
-  - -f=deploy/Dockerfile.python
-  - '-t=gcr.io/$PROJECT_ID/python:$TAG_NAME'
-  - '-t=gcr.io/$PROJECT_ID/python:$BUILD_ID'
-  - '--cache-from=gcr.io/$PROJECT_ID/python:$TAG_NAME'
-  - .
+    - -c
+    - >
+      docker build \
+        -f=deploy/Dockerfile.python \
+        -t=gcr.io/$PROJECT_ID/python:$TAG_NAME \
+        -t=gcr.io/$PROJECT_ID/python:$BUILD_ID \
+        --cache-from=gcr.io/$PROJECT_ID/python:$TAG_NAME \
+        . &&
+      docker push gcr.io/$PROJECT_ID/python:$BUILD_ID
 
 - name: 'gcr.io/cloud-builders/docker'
-  id: build-node
-  waitFor: ['pull-node']
+  id: nginx-image
+  waitFor: ['pull-nginx', 'python-deps', 'node-deps']
+  entrypoint: bash
   args:
-  - build
-  - -f=deploy/Dockerfile.node
-  - --build-arg
-  - 'PUBLIC_URL=https://$_HOST'
-  - '-t=gcr.io/$PROJECT_ID/node:$TAG_NAME'
-  - '-t=gcr.io/$PROJECT_ID/node:$BUILD_ID'
-  - '--cache-from=gcr.io/$PROJECT_ID/node:$TAG_NAME'
-  - .
-
-- name: 'gcr.io/cloud-builders/docker'
-  id: build-nginx
-  waitFor: ['pull-nginx', 'build-python', 'build-node']
-  args:
-  - build
-  - -f=deploy/Dockerfile.nginx
-  - '-t=gcr.io/$PROJECT_ID/nginx:$TAG_NAME'
-  - '-t=gcr.io/$PROJECT_ID/nginx:$BUILD_ID'
-  - '--cache-from=gcr.io/$PROJECT_ID/nginx:$TAG_NAME'
-  - .
-
-# Push images to GCR
-
-- name: 'gcr.io/cloud-builders/docker'
-  id: push-python
-  waitFor: ['build-python']
-  args: ['push', 'gcr.io/$PROJECT_ID/python:$BUILD_ID']
-
-- name: 'gcr.io/cloud-builders/docker'
-  id: push-node
-  waitFor: ['build-node']
-  args: ['push', 'gcr.io/$PROJECT_ID/node:$BUILD_ID']
-
-- name: 'gcr.io/cloud-builders/docker'
-  id: push-nginx
-  waitFor: ['build-nginx']
-  args: ['push', 'gcr.io/$PROJECT_ID/nginx:$BUILD_ID']
+    - -c
+    - >
+      docker build \
+        -f=deploy/Dockerfile.nginx \
+        -t=gcr.io/$PROJECT_ID/nginx:$TAG_NAME \
+        -t=gcr.io/$PROJECT_ID/nginx:$BUILD_ID \
+        --cache-from=gcr.io/$PROJECT_ID/nginx:$TAG_NAME \
+        . &&
+      docker push gcr.io/$PROJECT_ID/nginx:$BUILD_ID
 
 # Decrypt docker certs
 
 - name: 'gcr.io/cloud-builders/gcloud'
-  id: decrypt-ca
+  id: docker-certs
   waitFor: ['-']
+  entrypoint: bash
   args:
-  - kms
-  - decrypt
-  - --ciphertext-file=deploy/ca.pem.enc
-  - --plaintext-file=ca.pem
-  - --location=global
-  - --keyring=linksight
-  - --key=linksight
-
-- name: 'gcr.io/cloud-builders/gcloud'
-  id: decrypt-cert
-  waitFor: ['-']
-  args:
-  - kms
-  - decrypt
-  - --ciphertext-file=deploy/cert.pem.enc
-  - --plaintext-file=cert.pem
-  - --location=global
-  - --keyring=linksight
-  - --key=linksight
-
-- name: 'gcr.io/cloud-builders/gcloud'
-  id: decrypt-key
-  waitFor: ['-']
-  args:
-  - kms
-  - decrypt
-  - --ciphertext-file=deploy/key.pem.enc
-  - --plaintext-file=key.pem
-  - --location=global
-  - --keyring=linksight
-  - --key=linksight
+    - -c
+    - >
+      gcloud kms decrypt \
+        --ciphertext-file=deploy/ca.pem.enc \
+        --plaintext-file=ca.pem \
+        --location=global \
+        --keyring=linksight \
+        --key=linksight &&
+      gcloud kms decrypt \
+        --ciphertext-file=deploy/cert.pem.enc \
+        --plaintext-file=cert.pem \
+        --location=global \
+        --keyring=linksight \
+        --key=linksight &&
+      gcloud kms decrypt \
+        --ciphertext-file=deploy/key.pem.enc \
+        --plaintext-file=key.pem \
+        --location=global \
+        --keyring=linksight \
+        --key=linksight
 
 # Update containers
 
 - name: 'docker/compose:1.22.0'
   id: compose-pull
-  waitFor: ['push-python', 'push-nginx', 'decrypt-ca', 'decrypt-cert', 'decrypt-key']
+  waitFor: ['python-image', 'nginx-image', 'docker-certs']
   args: ['-p', 'linksight', '-f', 'deploy/docker-compose.yml', 'pull']
   env:
   - 'DOCKER_HOST=$_HOST:2376'
@@ -140,21 +164,11 @@ steps:
 
 - name: 'docker/compose:1.22.0'
   id: compose-up
-  waitFor: ['push-python', 'push-nginx', 'decrypt-ca', 'decrypt-cert', 'decrypt-key']
+  waitFor: ['compose-pull']
   args: ['-p', 'linksight', '-f', 'deploy/docker-compose.yml', 'up', '-d']
   env:
   - 'DOCKER_HOST=$_HOST:2376'
   - DOCKER_TLS_VERIFY=1
   - DOCKER_CERT_PATH=.
   - 'BUILD_ID=$BUILD_ID'
-
-# Other build config
-
-images:
-- 'gcr.io/$PROJECT_ID/python:$TAG_NAME'
-- 'gcr.io/$PROJECT_ID/node:$TAG_NAME'
-- 'gcr.io/$PROJECT_ID/nginx:$TAG_NAME'
-
-substitutions:
-  _HOST: linksight.thinkingmachin.es
 

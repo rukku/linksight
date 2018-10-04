@@ -2,21 +2,11 @@
 __pycache__/
 venv/
 
-# Django
-/media/
-/static/
-
 # Node
-/app/node_modules
-/app/coverage
-/app/build
+node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-# Secrets
-*.env
-*.pem
 
 # PyCharm
 /.idea/
@@ -31,5 +21,16 @@ clean-psgc.csv
 service-account-key.json
 
 # Ansible
-deploy/*.retry
-deploy/hosts.yml
+*.retry
+hosts.yml
+
+# Secrets
+*.env
+/deploy/secrets/
+
+# Django
+/media/
+/static/
+
+# Neutrino
+/app/build
